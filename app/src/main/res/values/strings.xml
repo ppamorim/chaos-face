@@ -1,0 +1,18 @@
+<resources>
+  <string name="app_name">Chaos</string>
+  <string-array name="colors_accent_name">
+    <item>White</item>
+    <item>Bright Pink</item>
+    <item>Red</item>
+    <item>Orange</item>
+    <item>Yellow</item>
+    <item>Chartreuse</item>
+    <item>Green</item>
+    <item>Spring Green</item>
+    <item>Cyan</item>
+    <item>Azure</item>
+    <item>Blue</item>
+    <item>Violet</item>
+    <item>Magenta</item>
+  </string-array>
+</resources>
