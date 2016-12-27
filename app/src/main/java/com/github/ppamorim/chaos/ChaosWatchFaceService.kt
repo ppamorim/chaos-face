@@ -70,10 +70,11 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
 
   inner class Engine : CanvasWatchFaceService.Engine() {
 
-    internal val mUpdateTimeHandler: Handler = EngineHandler(this)
-    internal var mRegisteredTimeZoneReceiver = false
+    internal val animationHandler = Handler()
+    internal val updateTimeHandler: Handler = EngineHandler(this)
+    internal var registeredTimeZoneReceiver = false
     internal var registeredColorAccentReceiver = false
-    internal var mBackgroundPaint: Paint? = null
+    internal var backgroundPaint: Paint? = null
     internal var pointerPaint: Paint? = null
 
     internal var centerBallPaint: Paint? = null
@@ -90,17 +91,48 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
     internal var accentColor = Color.RED
 
     internal var radius = 5
-
+    internal var bounds: Rect? = null
     internal val centerBallRadius = 10F
 
-    internal var mAmbient = false
-    internal var mTime: Time? = null
+    internal var ambient = false
+    internal var time: Time? = null
 
-    internal val mTimeZoneReceiver: BroadcastReceiver = object : BroadcastReceiver() {
+    internal var xOffset = 0F
+    internal var yOffset = 0F
+
+    internal var bias = 0
+    internal var diff = 0F
+    internal var including = false
+
+    internal var centerX = 0F
+    internal var centerY = 0F
+    internal var secRot = 0F
+    internal var minutes = 0
+    internal var minRot = 0F
+    internal var hrRot = 0F
+    internal var secLength = 0F
+    internal var minLength = 0F
+    internal var hrLength = 0F
+    internal var minX = 0F
+    internal var minY = 0F
+    internal var hrX = 0F
+    internal var hrY = 0F
+    internal var secX = 0F
+    internal var secY = 0F
+
+    internal var invalidator: Runnable? = null
+
+    /**
+     * Whether the display supports fewer bits for each color in ambient mode. When true, we
+     * disable anti-aliasing in ambient mode.
+     */
+    internal var lowBitAmbient = false
+
+    internal val timeZoneReceiver: BroadcastReceiver = object : BroadcastReceiver() {
       override fun onReceive(context: Context, intent: Intent) {
         if (intent.hasExtra(TIME_ZONE)) {
-          mTime?.clear(intent.getStringExtra(TIME_ZONE))
-          mTime?.setToNow()
+          time?.clear(intent.getStringExtra(TIME_ZONE))
+          time?.setToNow()
         }
       }
     }
@@ -115,22 +147,11 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
           hoursBallPaintOut = createBallPaint(accentColor)
           centerBallPaint = createBallPaint(accentColor)
           textTimePaint = createBallPaint(accentColor)
+          calculatePoints(bounds)
           invalidate()
         }
       }
     }
-
-    internal var mXOffset = 0F
-    internal var mYOffset = 0F
-
-    internal val handler = Handler()
-    internal var invalidator: Runnable? = null
-
-    /**
-     * Whether the display supports fewer bits for each color in ambient mode. When true, we
-     * disable anti-aliasing in ambient mode.
-     */
-    internal var mLowBitAmbient: Boolean = false
 
     override fun onCreate(holder: SurfaceHolder?) {
       super.onCreate(holder)
@@ -140,7 +161,7 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
           WatchFaceStyle.BACKGROUND_VISIBILITY_INTERRUPTIVE).setShowSystemUiTime(
           false).setAcceptsTapEvents(true).build())
       val resources = this@ChaosWatchFaceService.resources
-      mYOffset = resources.getDimension(R.dimen.digital_y_offset)
+      yOffset = resources.getDimension(R.dimen.digital_y_offset)
 
       val shared = this@ChaosWatchFaceService.applicationContext.getSharedPreferences(
           "com.github.ppamorim.chaos", Context.MODE_PRIVATE)
@@ -149,8 +170,8 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
         accentColor = shared.getInt(ACCENT_COLOR, Color.GREEN)
       }
 
-      mBackgroundPaint = Paint()
-      mBackgroundPaint?.color = resources.getColor(R.color.background_1)
+      backgroundPaint = Paint()
+      backgroundPaint?.color = resources.getColor(R.color.background_1)
 
       pointerPaint = createPointerPaint(resources.getColor(R.color.digital_text))
 
@@ -164,14 +185,14 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
       secondsBallPaintIn = createBallPaint(resources.getColor(R.color.background_1))
       textTimePaint = createBallPaint(accentColor)
 
-      mTime = Time()
+      time = Time()
 
       registerConfigChangeReceiver()
 
     }
 
     override fun onDestroy() {
-      mUpdateTimeHandler.removeMessages(MSG_UPDATE_TIME)
+      updateTimeHandler.removeMessages(MSG_UPDATE_TIME)
       unregisterConfigChangeReceiver()
       super.onDestroy()
     }
@@ -199,8 +220,8 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
         registerTimerReceiver()
 
         // Update time zone in case it changed while we weren't visible.
-        mTime?.clear(TimeZone.getDefault().id)
-        mTime?.setToNow()
+        time?.clear(TimeZone.getDefault().id)
+        time?.setToNow()
       } else {
         unregisterTimerReceiver()
       }
@@ -211,20 +232,20 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
     }
 
     private fun registerTimerReceiver() {
-      if (mRegisteredTimeZoneReceiver) {
+      if (registeredTimeZoneReceiver) {
         return
       }
-      mRegisteredTimeZoneReceiver = true
-      this@ChaosWatchFaceService.registerReceiver(mTimeZoneReceiver,
+      registeredTimeZoneReceiver = true
+      this@ChaosWatchFaceService.registerReceiver(timeZoneReceiver,
           IntentFilter(Intent.ACTION_TIMEZONE_CHANGED))
     }
 
     private fun unregisterTimerReceiver() {
-      if (!mRegisteredTimeZoneReceiver) {
+      if (!registeredTimeZoneReceiver) {
         return
       }
-      mRegisteredTimeZoneReceiver = false
-      this@ChaosWatchFaceService.unregisterReceiver(mTimeZoneReceiver)
+      registeredTimeZoneReceiver = false
+      this@ChaosWatchFaceService.unregisterReceiver(timeZoneReceiver)
     }
 
     private fun registerConfigChangeReceiver() {
@@ -251,34 +272,37 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
       // Load resources that have alternate values for round watches.
       val resources = this@ChaosWatchFaceService.resources
       val isRound = insets.isRound
-      mXOffset = resources.getDimension(
+      xOffset = resources.getDimension(
           if (isRound) R.dimen.digital_x_offset_round else R.dimen.digital_x_offset)
     }
 
     override fun onPropertiesChanged(properties: Bundle?) {
       super.onPropertiesChanged(properties)
-      mLowBitAmbient = properties?.getBoolean(WatchFaceService.PROPERTY_LOW_BIT_AMBIENT, false)
-          ?: mLowBitAmbient
+      lowBitAmbient = properties?.getBoolean(WatchFaceService.PROPERTY_LOW_BIT_AMBIENT, false)
+          ?: lowBitAmbient
     }
 
     override fun onTimeTick() {
       super.onTimeTick()
+      calculatePoints(bounds)
       invalidate()
     }
 
     override fun onAmbientModeChanged(inAmbientMode: Boolean) {
       super.onAmbientModeChanged(inAmbientMode)
-      if (mAmbient != inAmbientMode) {
-        mAmbient = inAmbientMode
-        if (mLowBitAmbient) {
+
+      if (ambient != inAmbientMode) {
+
+        ambient = inAmbientMode
+
+        if (lowBitAmbient) {
           pointerPaint?.isAntiAlias = !inAmbientMode
           textTimePaint?.isAntiAlias = !inAmbientMode
         }
 
         if (invalidator == null) {
           invalidator = Runnable {
-//            if (!mAmbient) {
-            if (true) {
+            if (!ambient) {
 
               if (bias == 100) {
                 including = false
@@ -294,15 +318,19 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
 
               diff = Math.cos(bias/50.0).toFloat()
 
+              println("Diff $diff")
+
+              calculatePoints(bounds)
               invalidate()
-              handler.postDelayed(invalidator, 30)
+              animationHandler.postDelayed(invalidator, 30)
             } else {
               invalidator = null
             }
           }
-          handler.postDelayed(invalidator, 30)
+          animationHandler.postDelayed(invalidator, 30)
         }
 
+        calculatePoints(bounds)
         invalidate()
       }
 
@@ -325,83 +353,100 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
         }
       }// The user has started touching the screen.
       // The user has started a different gesture or otherwise cancelled the tap.
+      calculatePoints(bounds)
       invalidate()
     }
 
-    var bias = 0
-    var diff = 0F
-    var including = false
+    fun calculatePoints(bounds: Rect? = null) {
+
+      if (bounds == null) {
+        return
+      }
+
+      time?.let { time ->
+
+        time.setToNow()
+
+        // Find the center. Ignore the window insets so that, on round watches with a
+        // "chin", the watch face is centered on the entire screen, not just the usable
+        // portion.
+        if (centerX == 0F) {
+          centerX = bounds.width() / 2F
+        }
+        if (centerY == 0F) {
+          centerY = bounds.height() / 2F
+        }
+
+        secRot = time.second / 30F * Math.PI.toFloat()
+        minutes = time.minute
+        minRot = minutes / 30F * Math.PI.toFloat()
+        hrRot = (time.hour + minutes / 60F) / 6F * Math.PI.toFloat()
+
+        secLength = centerX - 60
+        minLength = centerX - 40
+        hrLength = centerX - 20
+
+        minX = Math.sin(minRot.toDouble()).toFloat() * minLength
+        minY = (-Math.cos(minRot.toDouble())).toFloat() * minLength
+
+        hrX = Math.sin(hrRot.toDouble()).toFloat() * hrLength
+        hrY = (-Math.cos(hrRot.toDouble())).toFloat() * hrLength
+
+        secX = Math.sin(secRot.toDouble()).toFloat() * secLength
+        secY = (-Math.cos(secRot.toDouble())).toFloat() * secLength
+
+      }
+    }
 
     override fun onDraw(canvas: Canvas?, bounds: Rect?) {
       super.onDraw(canvas, bounds)
 
-      mTime?.let { mTime ->
+      this.bounds = bounds
 
-        mTime.setToNow()
+      canvas?.run {
 
-        bounds?.let { bounds ->
+        // Draw the background.
+        if (isInAmbientMode) {
+          drawColor(Color.BLACK)
+        } else {
+          drawRect(0f, 0f, centerX * 2, centerY * 2, backgroundPaint)
+        }
 
-          // Find the center. Ignore the window insets so that, on round watches with a
-          // "chin", the watch face is centered on the entire screen, not just the usable
-          // portion.
-          val centerX = bounds.width() / 2f
-          val centerY = bounds.height() / 2f
+        if (!ambient) {
 
+          //Hour circle
+          drawCircle(centerX, centerY, hrLength + radius, hoursBallPaintOut)
+          drawCircle(centerX, centerY, hrLength + diff, hoursBallPaint)
+          drawLine(centerX, centerY, centerX + hrX - diff, centerY + hrY - diff, pointerPaint)
 
-          // Draw the background.
-          if (isInAmbientMode) {
-            canvas?.drawColor(Color.BLACK)
-          } else {
-            canvas?.drawRect(0f, 0f, bounds.width().toFloat(), bounds.height().toFloat(),
-                mBackgroundPaint)
-          }
+          //Minute circle
+          drawCircle(centerX, centerY, minLength + radius, minutesBallPaintOut)
+          drawCircle(centerX, centerY, minLength - diff, minutesBallPaint)
+          drawLine(centerX, centerY, centerX + minX + diff, centerY + minY + diff, pointerPaint)
 
-          val secRot = mTime.second / 30f * Math.PI.toFloat()
-          val minutes = mTime.minute
-          val minRot = minutes / 30f * Math.PI.toFloat()
-          val hrRot = (mTime.hour + minutes / 60f) / 6f * Math.PI.toFloat()
+          //Seconds circle
+          drawCircle(centerX, centerY, secLength + radius, secondsBallPaintOut)
+          drawCircle(centerX, centerY, secLength + diff, secondsBallPaint)
 
-          val secLength = centerX - 60
-          val minLength = centerX - 40
-          val hrLength = centerX - 20
+          //Seconds line
+          drawLine(centerX, centerY, centerX + secX + diff, centerY + secY + diff, pointerPaint)
 
-          val minX = Math.sin(minRot.toDouble()).toFloat() * minLength
-          val minY = (-Math.cos(minRot.toDouble())).toFloat() * minLength
+          //Center ball and inner black ball
+          drawCircle(centerX, centerY, secLength - (20 - radius) , secondsBallPaintIn)
+          drawCircle(centerX, centerY, centerBallRadius, centerBallPaint)
 
-          val hrX = Math.sin(hrRot.toDouble()).toFloat() * hrLength
-          val hrY = (-Math.cos(hrRot.toDouble())).toFloat() * hrLength
+        } else {
+          drawLine(centerX, centerY, centerX + minX, centerY + minY, pointerPaint)
+          drawLine(centerX, centerY, centerX + hrX, centerY + hrY, pointerPaint)
+          drawCircle(centerX, centerY, centerBallRadius, pointerPaint)
+        }
 
-          if (!mAmbient) {
-
-            canvas?.drawCircle(centerX, centerY, hrLength + radius, hoursBallPaintOut)
-            canvas?.drawCircle(centerX, centerY, hrLength + diff, hoursBallPaint)
-            canvas?.drawLine(centerX, centerY, centerX + hrX - diff, centerY + hrY - diff, pointerPaint)
-
-            canvas?.drawCircle(centerX, centerY, minLength + radius, minutesBallPaintOut)
-            canvas?.drawCircle(centerX, centerY, minLength - diff, minutesBallPaint)
-            canvas?.drawLine(centerX, centerY, centerX + minX + diff, centerY + minY + diff, pointerPaint)
-
-            canvas?.drawCircle(centerX, centerY, secLength + radius, secondsBallPaintOut)
-            canvas?.drawCircle(centerX, centerY, secLength + diff, secondsBallPaint)
-
-            val secX = Math.sin(secRot.toDouble()).toFloat() * secLength
-            val secY = (-Math.cos(secRot.toDouble())).toFloat() * secLength
-            canvas?.drawLine(centerX, centerY, centerX + secX + diff, centerY + secY + diff, pointerPaint)
-
-            canvas?.drawCircle(centerX, centerY, secLength - (20 - radius) , secondsBallPaintIn)
-
-            canvas?.drawCircle(centerX, centerY, centerBallRadius, centerBallPaint)
-
-          } else {
-            canvas?.drawLine(centerX, centerY, centerX + minX, centerY + minY, pointerPaint)
-            canvas?.drawLine(centerX, centerY, centerX + hrX, centerY + hrY, pointerPaint)
-            canvas?.drawCircle(centerX, centerY, centerBallRadius, pointerPaint)
-          }
+      }
 
           //Sorry!
 
-//          val text = if (mAmbient) String.format("%d:%02d", mTime.hour, mTime.minute)
-//          else String.format("%d:%02d:%02d", mTime.hour, mTime.minute, mTime.second)
+//          val text = if (ambient) String.format("%d:%02d", time.hour, time.minute)
+//          else String.format("%d:%02d:%02d", time.hour, time.minute, time.second)
 //
 //          val textTimeBounds = Rect()
 //          textTimePaint?.getTextBounds(text, 0, text.length, bounds)
@@ -410,25 +455,21 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
 //
 //          canvas?.drawText(text, centerX - width/2, centerY + height, textTimePaint)
 
-        }
-
-      }
-
     }
 
     /**
-     * Starts the [.mUpdateTimeHandler] timer if it should be running and isn't currently
+     * Starts the [.updateTimeHandler] timer if it should be running and isn't currently
      * or stops it if it shouldn't be running but currently is.
      */
     private fun updateTimer() {
-      mUpdateTimeHandler.removeMessages(MSG_UPDATE_TIME)
+      updateTimeHandler.removeMessages(MSG_UPDATE_TIME)
       if (shouldTimerBeRunning()) {
-        mUpdateTimeHandler.sendEmptyMessage(MSG_UPDATE_TIME)
+        updateTimeHandler.sendEmptyMessage(MSG_UPDATE_TIME)
       }
     }
 
     /**
-     * Returns whether the [.mUpdateTimeHandler] timer should be running. The timer should
+     * Returns whether the [.updateTimeHandler] timer should be running. The timer should
      * only run when we're visible and in interactive mode.
      */
     private fun shouldTimerBeRunning() = isVisible && !isInAmbientMode
@@ -437,11 +478,12 @@ class ChaosWatchFaceService: CanvasWatchFaceService() {
      * Handle updating the time periodically in interactive mode.
      */
     fun handleUpdateTimeMessage() {
+      calculatePoints(bounds)
       invalidate()
       if (shouldTimerBeRunning()) {
         val timeMs = System.currentTimeMillis()
         val delayMs = INTERACTIVE_UPDATE_RATE_MS - timeMs % INTERACTIVE_UPDATE_RATE_MS
-        mUpdateTimeHandler.sendEmptyMessageDelayed(MSG_UPDATE_TIME, delayMs)
+        updateTimeHandler.sendEmptyMessageDelayed(MSG_UPDATE_TIME, delayMs)
       }
     }
   }
